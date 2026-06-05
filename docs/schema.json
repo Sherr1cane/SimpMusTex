@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tonecraft.local/schemas/mustex-score/v0.1/schema.json",
+  "title": "MusTexScore",
+  "type": "object",
+  "required": ["schema", "format", "metadata", "global", "sections", "source"],
+  "properties": {
+    "schema": {
+      "const": "mustex-score/v0.1"
+    },
+    "format": {
+      "const": "MusTex"
+    },
+    "metadata": {
+      "type": "object"
+    },
+    "global": {
+      "type": "object",
+      "required": ["key", "meter", "tempo"],
+      "properties": {
+        "key": {
+          "type": "object",
+          "required": ["tonicDegree", "tonicPitch", "mode"],
+          "properties": {
+            "tonicDegree": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 7
+            },
+            "tonicPitch": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string"
+            }
+          }
+        },
+        "meter": {
+          "type": "object",
+          "required": ["beats", "beatType"],
+          "properties": {
+            "beats": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "beatType": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "tempo": {
+          "type": "object",
+          "required": ["beatUnit", "bpm"],
+          "properties": {
+            "beatUnit": {
+              "type": "string"
+            },
+            "bpm": {
+              "type": ["number", "null"]
+            }
+          }
+        }
+      }
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/section"
+      },
+      "minItems": 1
+    },
+    "source": {
+      "type": "object",
+      "required": ["type", "lyricsMode", "input"],
+      "properties": {
+        "type": {
+          "const": "mustex"
+        },
+        "lyricsMode": {
+          "const": "none"
+        },
+        "input": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "section": {
+      "type": "object",
+      "required": ["id", "name", "type", "measures"],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "measures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/measure"
+          },
+          "minItems": 1
+        }
+      }
+    },
+    "measure": {
+      "type": "object",
+      "required": ["id", "index", "leftBarline", "rightBarline", "elements"],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "leftBarline": {
+          "$ref": "#/$defs/barline"
+        },
+        "rightBarline": {
+          "$ref": "#/$defs/barline"
+        },
+        "elements": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/note" },
+              { "$ref": "#/$defs/rest" }
+            ]
+          }
+        }
+      }
+    },
+    "barline": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["normal", "double", "final", "repeatStart", "repeatEnd"]
+        }
+      }
+    },
+    "note": {
+      "type": "object",
+      "required": ["type", "degree", "octaveShift", "accidental", "duration", "raw"],
+      "properties": {
+        "type": {
+          "const": "note"
+        },
+        "degree": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 7
+        },
+        "octaveShift": {
+          "type": "integer",
+          "minimum": -4,
+          "maximum": 4
+        },
+        "accidental": {
+          "type": ["string", "null"],
+          "enum": ["sharp", "flat", "natural", null]
+        },
+        "duration": {
+          "$ref": "#/$defs/duration"
+        },
+        "raw": {
+          "type": "string"
+        }
+      }
+    },
+    "rest": {
+      "type": "object",
+      "required": ["type", "duration", "raw"],
+      "properties": {
+        "type": {
+          "const": "rest"
+        },
+        "duration": {
+          "$ref": "#/$defs/duration"
+        },
+        "raw": {
+          "type": "string"
+        }
+      }
+    },
+    "duration": {
+      "type": "object",
+      "required": ["unit", "underlines", "dots", "extensions", "beats"],
+      "properties": {
+        "unit": {
+          "const": "quarter"
+        },
+        "underlines": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dots": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "extensions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "beats": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

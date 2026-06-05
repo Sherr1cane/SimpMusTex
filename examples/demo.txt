@@ -1,0 +1,6 @@
+title: MusTex Demo
+key: 1=F
+meter: 4/4
+tempo: 88
+
+6, 1 2 3 | 6 6_ 1 2 | 3--- ||

@@ -1,0 +1,6 @@
+title: Curves Demo
+key: 1=F
+meter: 4/4
+
+6~ | 6 |
+<s 3 2 | 1 > |
