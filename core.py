@@ -157,8 +157,8 @@ def render_score_svg(score: dict[str, Any]) -> str:
     tempo_y = 92
     row_top = 138
     row_gap = 110
-    measure_gap = 18
-    row_width = 980
+    measure_gap = 12
+    row_width = 1240
     beats_unit = 42
     digits_y = 0
     max_rows = 1
@@ -192,7 +192,7 @@ def render_score_svg(score: dict[str, Any]) -> str:
         ".digit { font: 32px 'Helvetica Neue', Arial, sans-serif; font-weight: 600; }",
         ".mark { font: 18px 'Helvetica Neue', Arial, sans-serif; }",
         ".grace { font: 14px 'Helvetica Neue', Arial, sans-serif; }",
-        ".dash { font: 16px 'Helvetica Neue', Arial, sans-serif; }",
+        ".dash { stroke: #111; stroke-width: 1.6; stroke-linecap: round; }",
         ".lyrics { font: 16px 'Noto Serif CJK SC', 'Songti SC', serif; fill: #333; }",
         ".bar { stroke: #111; stroke-width: 2; }",
         ".thin { stroke: #111; stroke-width: 1.5; }",
@@ -224,6 +224,7 @@ def render_score_svg(score: dict[str, Any]) -> str:
     for row_index, row in enumerate(rows):
         y = row_top + row_index * row_gap
         x = margin_x
+        previous_right_bar_x: float | None = None
         row_measure_widths = _allocate_row_measure_widths(row, row_width, measure_gap)
         for measure_index, (measure, measure_width) in enumerate(zip(row, row_measure_widths)):
             measure_parts, measure_placements = _render_measure_svg(
@@ -237,12 +238,16 @@ def render_score_svg(score: dict[str, Any]) -> str:
             )
             parts.extend(measure_parts)
             placements.update(measure_placements)
+            right_bar_type = measure.get("rightBarline", {}).get("type", "normal")
+            left_bar_x = x if measure_index == 0 or previous_right_bar_x is None else previous_right_bar_x
+            right_bar_x = x + measure_width - 12 + (5 if right_bar_type in {"double", "final", "repeatEnd"} else 0)
             measure_bounds[measure["id"]] = {
-                "left_x": x + 24,
-                "right_x": x + measure_width - 16,
+                "left_x": left_bar_x,
+                "right_x": right_bar_x,
                 "row_y": y,
                 "top_y": y - 28,
             }
+            previous_right_bar_x = right_bar_x
             x += measure_width + measure_gap
 
     parts.extend(_render_curves_svg(curves, placements))
@@ -279,6 +284,7 @@ def _split_headers(text: str) -> HeaderBlock:
 
     lines = text.splitlines()
     body_start = 0
+    known_headers = {"title", "composer", "arranger", "key", "meter", "tempo"}
     for index, raw_line in enumerate(lines):
         line = raw_line.strip()
         if not line:
@@ -290,6 +296,9 @@ def _split_headers(text: str) -> HeaderBlock:
 
         key, value = [part.strip() for part in line.split(":", 1)]
         key_lower = key.lower()
+        if key_lower not in known_headers:
+            body_start = index
+            break
         if key_lower == "title":
             metadata["title"] = value
         elif key_lower == "composer":
@@ -591,6 +600,13 @@ def _split_lyrics_from_token(raw_token: str) -> list[str]:
 def _split_compound_token(raw_token: str) -> list[str]:
     tokens: list[str] = []
     token = raw_token
+    if token.startswith("[") and len(token) > 2 and token[1].isdigit():
+        prefix = "[" + token[1]
+        rest = token[2:]
+        tokens.append(prefix)
+        if rest:
+            tokens.extend(_split_compound_token(rest))
+        return tokens
     if token.startswith("(") and token != "(":
         tokens.append("(")
         token = token[1:]
@@ -947,31 +963,27 @@ def _render_measure_svg(
     if draw_left_barline:
         left_type = measure.get("leftBarline", {}).get("type", "normal")
         parts.extend(_render_barline_svg(left_type, cursor, top, bottom, is_left=True))
-    cursor += 18
-    content_left = cursor + 6
-    content_right = x + width - 28
+        cursor += 18
+        content_left = cursor + 6
+    else:
+        content_left = x + 2
+    content_right = x + width - 20
     content_width = max(1.0, content_right - content_left)
 
     positioned_elements: list[dict[str, Any]] = []
     elements = measure.get("elements", [])
-    slot_count = max(
-        1,
-        sum(
-            1 + int(element.get("duration", {}).get("extensions", 0))
-            for element in elements
-        ),
-    )
-    cell_width = content_width / slot_count
+    unit_total = max(1.0, sum(_element_layout_units(element) for element in elements))
     beat_cursor = 0.0
-    slot_index = 0
+    unit_cursor = 0.0
     for element in elements:
         duration = element.get("duration", {})
         beats = max(0.25, float(duration.get("beats", 1.0)))
         extensions = int(duration.get("extensions", 0))
-        span_left = content_left + cell_width * slot_index
-        span_right = content_left + cell_width * (slot_index + 1)
+        element_units = _element_layout_units(element)
+        span_left = content_left + content_width * (unit_cursor / unit_total)
+        span_right = content_left + content_width * ((unit_cursor + element_units) / unit_total)
         extension_slot_centers = [
-            content_left + cell_width * (slot_index + 1 + ext_index) + cell_width / 2
+            span_left + (span_right - span_left) * (ext_index + 1) / (extensions + 1)
             for ext_index in range(extensions)
         ]
         positioned_elements.append(
@@ -982,23 +994,28 @@ def _render_measure_svg(
                 "baseline_y": y,
                 "start_beat": beat_cursor,
                 "end_beat": beat_cursor + beats,
-                "slot_index": slot_index,
-                "slot_width": cell_width,
+                "slot_index": unit_cursor,
+                "slot_width": span_right - span_left,
                 "extension_slot_centers": extension_slot_centers,
             }
         )
         beat_cursor += beats
-        slot_index += 1 + extensions
+        unit_cursor += element_units
 
     _apply_minimum_spacing(positioned_elements)
 
     for item in positioned_elements:
         element = item["element"]
         center_x = item["center_x"]
+        extension_boxes = item.get("extension_boxes", [])
+        extension_right_x = max((float(x2) for _, x2 in extension_boxes), default=float(item["body_right_x"]))
         placements[element["id"]] = {
             "center_x": center_x,
             "baseline_y": y,
             "row_y": y,
+            "body_left_x": float(item["body_left_x"]),
+            "body_right_x": float(item["body_right_x"]),
+            "extension_right_x": extension_right_x,
         }
         parts.extend(_render_element_svg(element, center_x, y))
 
@@ -1070,8 +1087,14 @@ def _render_element_svg(element: dict[str, Any], center_x: float, baseline_y: fl
 
     lyrics = element.get("lyrics")
     if lyrics:
+        lyrics_y = baseline_y + 44
+        octave_shift = int(element.get("octaveShift", 0))
+        if octave_shift < 0:
+            underlines_count = int(duration.get("underlines", 0))
+            low_dots_y = _low_octave_dots_y(baseline_y, underlines_count)
+            lyrics_y = max(lyrics_y, low_dots_y + 16)
         parts.append(
-            f'<text x="{center_x:.1f}" y="{baseline_y + 38:.1f}" text-anchor="middle" dominant-baseline="middle" class="lyrics">{escape(lyrics)}</text>'
+            f'<text x="{center_x:.1f}" y="{lyrics_y:.1f}" text-anchor="middle" dominant-baseline="middle" class="lyrics">{escape(lyrics)}</text>'
         )
 
     return parts
@@ -1194,14 +1217,12 @@ def _render_curves_svg(curves: list[dict[str, Any]], placements: dict[str, dict[
         baseline_y = min(float(start["baseline_y"]), float(end["baseline_y"]))
         kind = curve.get("kind")
         span = abs(end_x - start_x)
-        if kind == "tie":
-            arc_y = baseline_y - 16
-            control_lift = min(8.0, max(4.0, span * 0.04))
-        elif kind == "phrase":
-            arc_y = baseline_y - 46
+        if kind == "phrase":
+            arc_y = baseline_y - 42
             control_lift = min(24.0, max(14.0, span * 0.1))
         else:
-            arc_y = baseline_y - 34
+            # tie and slur use the same curve style
+            arc_y = baseline_y - 30
             control_lift = min(18.0, max(10.0, span * 0.08))
         control_y = arc_y - control_lift
         control_x = (start_x + end_x) / 2
@@ -1223,16 +1244,12 @@ def _render_groups_svg(groups: list[dict[str, Any]], placements: dict[str, dict[
             continue
         start_baseline_y = float(start["baseline_y"])
         end_baseline_y = float(end["baseline_y"])
+        start_x = float(start.get("body_left_x", start["center_x"])) - 10.0
         parts.append(
-            f'<text x="{float(start["center_x"]) - 14:.1f}" y="{start_baseline_y:.1f}" '
+            f'<text x="{start_x:.1f}" y="{start_baseline_y:.1f}" '
             f'text-anchor="middle" dominant-baseline="middle" class="mark">(</text>'
         )
-        # Offset ) to account for extensions (---) on the last element
-        end_x = float(end["center_x"]) + 14.0
-        if elements_by_id:
-            end_elem = elements_by_id.get(group.get("endId"), {})
-            ext_count = int(end_elem.get("duration", {}).get("extensions", 0))
-            end_x += ext_count * 28.0  # each extension slot ≈ cell_width
+        end_x = float(end.get("extension_right_x", end.get("body_right_x", end["center_x"]))) + 10.0
         parts.append(
             f'<text x="{end_x:.1f}" y="{end_baseline_y:.1f}" '
             f'text-anchor="middle" dominant-baseline="middle" class="mark">)</text>'
@@ -1267,22 +1284,45 @@ def _render_houses_svg(
     parts: list[str] = []
     measure_by_index = {index + 1: measure for index, measure in enumerate(measures)}
     for house in houses:
-        start_measure = measure_by_index.get(int(house["startMeasure"]))
-        end_measure = measure_by_index.get(int(house["endMeasure"]))
-        if not start_measure or not end_measure:
+        start_index = int(house["startMeasure"])
+        end_index = int(house["endMeasure"])
+        house_measures = [
+            measure_by_index[idx]
+            for idx in range(start_index, end_index + 1)
+            if idx in measure_by_index
+        ]
+        if not house_measures:
             continue
-        start_bounds = measure_bounds.get(start_measure["id"])
-        end_bounds = measure_bounds.get(end_measure["id"])
-        if not start_bounds or not end_bounds or start_bounds["row_y"] != end_bounds["row_y"]:
-            continue
-        y = float(start_bounds["top_y"]) - 18
-        x1 = float(start_bounds["left_x"])
-        x2 = float(end_bounds["right_x"])
-        parts.append(f'<line x1="{x1:.1f}" y1="{y:.1f}" x2="{x2:.1f}" y2="{y:.1f}" class="thin" />')
-        parts.append(f'<line x1="{x1:.1f}" y1="{y:.1f}" x2="{x1:.1f}" y2="{y + 12:.1f}" class="thin" />')
-        parts.append(
-            f'<text x="{x1 + 8:.1f}" y="{y - 2:.1f}" class="meta">{escape(str(house["number"]))}</text>'
-        )
+        row_segments: list[list[dict[str, Any]]] = []
+        current_segment: list[dict[str, Any]] = []
+        current_row_y: float | None = None
+        for measure in house_measures:
+            bounds = measure_bounds.get(measure["id"])
+            if not bounds:
+                continue
+            row_y = float(bounds["row_y"])
+            if current_segment and current_row_y != row_y:
+                row_segments.append(current_segment)
+                current_segment = []
+            current_segment.append(bounds)
+            current_row_y = row_y
+        if current_segment:
+            row_segments.append(current_segment)
+
+        for seg_index, segment in enumerate(row_segments):
+            start_bounds = segment[0]
+            end_bounds = segment[-1]
+            y = float(start_bounds["top_y"]) - 8
+            x1 = float(start_bounds["left_x"])
+            x2 = float(end_bounds["right_x"])
+            parts.append(f'<line x1="{x1:.1f}" y1="{y:.1f}" x2="{x2:.1f}" y2="{y:.1f}" class="thin" />')
+            if seg_index == 0:
+                parts.append(f'<line x1="{x1:.1f}" y1="{y:.1f}" x2="{x1:.1f}" y2="{y + 12:.1f}" class="thin" />')
+                parts.append(
+                    f'<text x="{x1 + 9:.1f}" y="{y - 6:.1f}" class="meta">{escape(str(house["number"]))}</text>'
+                )
+            if seg_index == len(row_segments) - 1:
+                parts.append(f'<line x1="{x2:.1f}" y1="{y:.1f}" x2="{x2:.1f}" y2="{y + 12:.1f}" class="thin" />')
     return parts
 
 
@@ -1328,8 +1368,8 @@ def _render_grace_svg(
         if octave_shift > 0:
             parts.extend(_render_octave_dots(x, grace_baseline - 16, octave_shift))
         elif octave_shift < 0:
-            # 低音点紧贴倚音下划线
-            parts.extend(_render_octave_dots(x, underline_y2 + 6.0, -octave_shift))
+            # 低音点略高于之前的位置，避免被误认成前一个音的附点
+            parts.extend(_render_octave_dots(x, underline_y2 + 4.5, -octave_shift))
         if align == "end":
             arc_start_x = x + 2.0
             arc_start_y = grace_baseline + 3.0
@@ -1382,60 +1422,224 @@ def _apply_minimum_spacing(positioned_elements: list[dict[str, Any]]) -> None:
     if not positioned_elements:
         return
 
+    n = len(positioned_elements)
+
     for item in positioned_elements:
-        left_bound = float(item["span_left"]) + 12.0
-        right_bound = max(left_bound, float(item["span_right"]) - 12.0)
+        left_extent, right_extent = _note_side_extents(item["element"])
+        item["left_extent"] = left_extent
+        item["right_extent"] = right_extent
+        item["preferred_center_x"] = 0.0
+
+    if n == 1:
+        item = positioned_elements[0]
+        left_bound, right_bound = _item_center_bounds(item)
         item["min_center_x"] = left_bound
         item["max_center_x"] = right_bound
-        item["center_x"] = min(max((left_bound + right_bound) / 2.0, left_bound), right_bound)
-        half_width = _note_body_half_width(item["element"])
-        item["half_width"] = half_width
-        item["body_left_x"] = item["center_x"] - half_width
-        item["body_right_x"] = item["center_x"] + half_width
-        item["left_x"] = item["body_left_x"]
-        item["right_x"] = item["body_right_x"]
+        item["preferred_center_x"] = _preferred_center_within_bounds(item, left_bound, right_bound)
+        item["center_x"] = float(item["preferred_center_x"])
+        _finalize_item_bounds(item)
+        _recalculate_extensions(positioned_elements, float(item["span_right"]))
+        return
 
-    for _ in range(3):
-        for index in range(1, len(positioned_elements)):
-            prev = positioned_elements[index - 1]
-            curr = positioned_elements[index]
-            min_gap = _minimum_center_gap(prev, curr)
-            curr["center_x"] = max(float(curr["center_x"]), float(prev["center_x"]) + min_gap)
-            curr["center_x"] = min(float(curr["center_x"]), float(curr["max_center_x"]))
+    content_left = float(positioned_elements[0]["span_left"])
+    content_right = float(positioned_elements[-1]["span_right"])
+    available = max(1.0, content_right - content_left)
 
-        for index in range(len(positioned_elements) - 2, -1, -1):
-            curr = positioned_elements[index]
-            nxt = positioned_elements[index + 1]
-            min_gap = _minimum_center_gap(curr, nxt)
-            curr["center_x"] = min(float(curr["center_x"]), float(nxt["center_x"]) - min_gap)
-            curr["center_x"] = max(float(curr["center_x"]), float(curr["min_center_x"]))
+    # Minimum center-to-center gaps between adjacent elements
+    min_gaps = [
+        _minimum_center_gap(positioned_elements[i], positioned_elements[i + 1])
+        for i in range(n - 1)
+    ]
+
+    # Compact edge padding + extra space to inner gaps
+    left_pad = float(positioned_elements[0]["left_extent"]) + 4.0
+    right_pad = float(positioned_elements[-1]["right_extent"]) + 4.0
+    total_with_pads = left_pad + right_pad + sum(min_gaps)
+
+    if total_with_pads <= available:
+        extra = available - total_with_pads
+        edge_extra = min(4.0, extra * 0.03)
+        inner_extra = max(0.0, extra - edge_extra * 2.0)
+        per_gap = inner_extra / max(1, n - 1)
+
+        x = content_left + left_pad + edge_extra
+        positioned_elements[0]["center_x"] = x
+        for i in range(1, n):
+            positioned_elements[i]["center_x"] = (
+                float(positioned_elements[i - 1]["center_x"]) + min_gaps[i - 1] + per_gap
+            )
+        for item in positioned_elements:
+            lb, rb = _item_center_bounds(item)
+            item["min_center_x"] = lb
+            item["max_center_x"] = rb
+            item["preferred_center_x"] = _preferred_center_within_bounds(item, lb, rb)
+            item["center_x"] = min(max(float(item["center_x"]), lb), rb)
+    else:
+        # Tight layout: push-based with clamping
+        for item in positioned_elements:
+            lb, rb = _item_center_bounds(item)
+            item["min_center_x"] = lb
+            item["max_center_x"] = rb
+            item["preferred_center_x"] = _preferred_center_within_bounds(item, lb, rb)
+            item["center_x"] = float(item["preferred_center_x"])
+
+        for _ in range(3):
+            for index in range(1, n):
+                prev = positioned_elements[index - 1]
+                curr = positioned_elements[index]
+                g = _minimum_center_gap(prev, curr)
+                curr["center_x"] = max(float(curr["center_x"]), float(prev["center_x"]) + g)
+                curr["center_x"] = min(float(curr["center_x"]), float(curr["max_center_x"]))
+
+            for index in range(n - 2, -1, -1):
+                curr = positioned_elements[index]
+                nxt = positioned_elements[index + 1]
+                g = _minimum_center_gap(curr, nxt)
+                curr["center_x"] = min(float(curr["center_x"]), float(nxt["center_x"]) - g)
+                curr["center_x"] = max(float(curr["center_x"]), float(curr["min_center_x"]))
 
     for item in positioned_elements:
-        half_width = float(item["half_width"])
-        item["body_left_x"] = float(item["center_x"]) - half_width
-        item["body_right_x"] = float(item["center_x"]) + half_width
-        item["left_x"] = item["body_left_x"]
-        item["right_x"] = item["body_right_x"]
+        _finalize_item_bounds(item)
+
+    # Reposition extension dashes to fill the gaps between adjusted notes
+    _recalculate_extensions(positioned_elements, content_right)
+
+
+def _finalize_item_bounds(item: dict[str, Any]) -> None:
+    """Update derived position fields after center_x is set."""
+    cx = float(item["center_x"])
+    item["body_left_x"] = cx - float(item["left_extent"])
+    item["body_right_x"] = cx + float(item["right_extent"])
+    item["left_x"] = item["body_left_x"]
+    item["right_x"] = item["body_right_x"]
+
+
+def _item_center_bounds(item: dict[str, Any]) -> tuple[float, float]:
+    left_bound = float(item["span_left"]) + float(item["left_extent"]) + 2.0
+    right_bound = max(left_bound, float(item["span_right"]) - float(item["right_extent"]) - 2.0)
+    return left_bound, right_bound
+
+
+def _preferred_center_within_bounds(item: dict[str, Any], left_bound: float, right_bound: float) -> float:
+    slack = max(0.0, right_bound - left_bound)
+    left_extent = float(item["left_extent"])
+    right_extent = float(item["right_extent"])
+    total_extent = max(1.0, left_extent + right_extent)
+    # More right-side attachments means the notehead should sit closer to the left.
+    left_bias = left_extent / total_extent
+    return left_bound + slack * left_bias
+
+
+def _recalculate_extensions(
+    positioned_elements: list[dict[str, Any]],
+    content_right: float,
+) -> None:
+    """Reposition extension dashes as independent slot boxes."""
+    n = len(positioned_elements)
+    for i in range(n):
+        item = positioned_elements[i]
+        element = item["element"]
+        ext_count = int(element.get("duration", {}).get("extensions", 0))
+        if ext_count <= 0:
+            continue
+
+        cx = float(item["center_x"])
+        start_x = cx + _extension_start_offset(element)
+        end_x = float(item["span_right"]) - 6.0
+        if i + 1 < n:
+            next_cx = float(positioned_elements[i + 1]["center_x"])
+            next_left_extent = float(positioned_elements[i + 1]["left_extent"])
+            end_x = min(end_x, next_cx - next_left_extent - 4.0)
+        else:
+            end_x = min(end_x, content_right - 4.0)
+
+        minimum_step = 18.0
+        minimum_total = minimum_step * ext_count
+        if end_x - start_x < minimum_total:
+            end_x = start_x + minimum_total
+            if i + 1 < n:
+                next_limit = next_cx - next_left_extent - 4.0
+                end_x = min(end_x, next_limit)
+            else:
+                end_x = min(end_x, content_right - 4.0)
+        if end_x <= start_x:
+            boxes = []
+            box_width = 12.0
+            gap = 6.0
+            left = start_x
+            for _ in range(ext_count):
+                boxes.append((left, left + box_width))
+                left += box_width + gap
+            item["extension_boxes"] = boxes
+            continue
+
+        gap = end_x - start_x
+        step = gap / ext_count
+        inset = min(3.5, max(2.5, step * 0.12))
+        item["extension_boxes"] = [
+            (start_x + step * j + inset, start_x + step * (j + 1) - inset)
+            for j in range(ext_count)
+        ]
+
+
+def _extension_start_offset(element: dict[str, Any]) -> float:
+    duration = element.get("duration", {})
+    dots = int(duration.get("dots", 0))
+    grace_after_count = len(element.get("graceAfter", []))
+    offset = 24.0 + dots * 8.0
+    if grace_after_count:
+        offset += grace_after_count * 12.0
+    return offset
 
 
 def _minimum_center_gap(left_item: dict[str, Any], right_item: dict[str, Any]) -> float:
-    return float(left_item["half_width"]) + float(right_item["half_width"]) + 8.0
+    gap = float(left_item["right_extent"]) + float(right_item["left_extent"]) + 14.0
+    ext = int(left_item["element"].get("duration", {}).get("extensions", 0))
+    dots = int(left_item["element"].get("duration", {}).get("dots", 0))
+    if ext:
+        gap += 10.0
+    if dots:
+        gap += 5.0
+    return gap
 
 
-def _note_body_half_width(element: dict[str, Any]) -> float:
+def _note_side_extents(element: dict[str, Any]) -> tuple[float, float]:
     if element.get("type") == "rest":
-        token = "0"
+        left = 8.0
+        right = 8.0
     else:
-        token = str(element.get("degree", ""))
         accidental = element.get("accidental")
+        left = 8.0
+        right = 8.0
         if accidental:
-            token += {"sharp": "#", "flat": "b", "natural": "n"}.get(accidental, "")
+            left = max(left, 22.0)
         octave_shift = int(element.get("octaveShift", 0))
-        if octave_shift > 0:
-            token += "'" * octave_shift
-        elif octave_shift < 0:
-            token += "," * (-octave_shift)
-    return 8.0 + max(0, len(token) - 1) * 3.2
+        if octave_shift != 0:
+            side_extra = min(6.0, abs(octave_shift) * 3.0)
+            left = max(left, 8.0 + side_extra)
+            right = max(right, 8.0 + side_extra)
+
+    grace_count = len(element.get("graceBefore", []))
+    if grace_count:
+        left += 14.0 * grace_count + 8.0
+
+    grace_after_count = len(element.get("graceAfter", []))
+    if grace_after_count:
+        right += 14.0 * grace_after_count + 8.0
+
+    dots = int(element.get("duration", {}).get("dots", 0))
+    if dots:
+        right = max(right, 20.0 + max(0, dots - 1) * 10.0 + 2.0)
+
+    ext = int(element.get("duration", {}).get("extensions", 0))
+    if ext:
+        right = max(right, 20.0 + ext * 18.0)
+
+    lyrics = element.get("lyrics")
+    if lyrics:
+        right = max(right, 10.0)
+
+    return left, right
 
 
 def _allocate_row_measure_widths(
@@ -1447,35 +1651,46 @@ def _allocate_row_measure_widths(
         return []
 
     available_width = row_width - measure_gap * max(0, len(row) - 1)
-    min_measure_width = 120.0
+    min_slot_width = 26.0
+    min_widths = []
+    for measure in row:
+        units = _measure_layout_units(measure)
+        min_widths.append(max(84.0, units * min_slot_width))
+
+    total_min = sum(min_widths)
+    if total_min >= available_width:
+        return [available_width * mw / total_min for mw in min_widths]
+
+    remaining = available_width - total_min
     weights = [_measure_visual_weight(measure) for measure in row]
-
-    if len(row) * min_measure_width >= available_width:
-        return [available_width / len(row)] * len(row)
-
-    remaining_width = available_width - len(row) * min_measure_width
     total_weight = sum(weights) or float(len(row))
     return [
-        min_measure_width + remaining_width * (weight / total_weight)
-        for weight in weights
+        min_w + remaining * (w / total_weight)
+        for min_w, w in zip(min_widths, weights)
     ]
 
 
 def _measure_visual_weight(measure: dict[str, Any]) -> float:
     weight = 0.0
     for element in measure.get("elements", []):
-        duration = element.get("duration", {})
-        extensions = int(duration.get("extensions", 0))
-        weight += 1.0 + extensions
-        if element.get("accidental"):
-            weight += 0.35
-        octave_shift = abs(int(element.get("octaveShift", 0)))
-        if octave_shift:
-            weight += min(0.5, octave_shift * 0.2)
-        dots = int(duration.get("dots", 0))
-        if dots:
-            weight += min(0.35, dots * 0.15)
+        weight += _element_layout_units(element)
     return max(1.0, weight)
+
+
+def _measure_layout_units(measure: dict[str, Any]) -> float:
+    units = 0.0
+    for element in measure.get("elements", []):
+        units += _element_layout_units(element)
+    return max(1.0, units)
+
+
+def _element_layout_units(element: dict[str, Any]) -> float:
+    left_extent, right_extent = _note_side_extents(element)
+    visual_width = left_extent + right_extent + 10.0
+    units = visual_width / 18.0
+    if element.get("lyrics"):
+        units += 0.3
+    return max(1.0, units)
 
 
 def _annotation_starts(
@@ -1554,10 +1769,13 @@ def _render_extensions_svg(
         if extensions <= 0:
             continue
         y = item["baseline_y"] + 1
-        dash_text_length = min(10.0, max(6.0, float(item.get("slot_width", 18.0)) * 0.34))
-        for x in item.get("extension_slot_centers", []):
+        boxes = [(float(x1), float(x2)) for x1, x2 in item.get("extension_boxes", [])]
+        if not boxes:
+            continue
+        for x1, x2 in boxes:
+            if x2 <= x1:
+                continue
             parts.append(
-                f'<text x="{float(x):.1f}" y="{y:.1f}" text-anchor="middle" dominant-baseline="middle" '
-                f'textLength="{dash_text_length:.1f}" lengthAdjust="spacingAndGlyphs" class="dash">—</text>'
+                f'<line x1="{x1:.1f}" y1="{y:.1f}" x2="{x2:.1f}" y2="{y:.1f}" class="dash" />'
             )
     return parts

@@ -89,15 +89,15 @@ class TestMusTexParse(unittest.TestCase):
         self.assertIn(">6<", svg)
         self.assertIn(">3<", svg)
         self.assertIn("♩ = 88", svg)
-        self.assertEqual(svg.count(">—<"), 3)
+        self.assertEqual(svg.count('class="dash"'), 3)
 
     def test_render_curve_svg(self):
         score = parse_mustex_text("key: 1=F\n\n6~6 <s 3 2 1 > |")
         svg = render_score_svg(score)
         self.assertIn('<path d="M', svg)
         self.assertEqual(svg.count('<path d="M'), 2)
-        self.assertIn(" 122.0", svg)
-        self.assertIn(" 104.0", svg)
+        # Tie and slur now use the same arc height
+        self.assertIn(" 108.0", svg)
 
     def test_render_cross_measure_curve_svg(self):
         tie_svg = render_score_svg(parse_mustex_text("key: 1=F\n\n6~ | 6 |"))
@@ -213,7 +213,105 @@ class TestMusTexParse(unittest.TestCase):
 
     def test_low_octave_dot_avoids_grace_underlines(self):
         svg = render_score_svg(parse_mustex_text("key: 1=F\n\n{6,}1 |"))
-        self.assertIn('cy="137.0"', svg)
+        self.assertIn('cy="135.5"', svg)
+
+    def test_extension_dashes_keep_separation(self):
+        svg = render_score_svg(parse_mustex_text("key: 1=F\n\n2-- 3_ 2_ |"))
+        xs = [
+            float(match.group(1))
+            for match in re.finditer(r'<line x1="([0-9.]+)" y1="139.0" x2="([0-9.]+)" y2="139.0" class="dash" />', svg)
+        ]
+        dash_segments = [
+            (float(m.group(1)), float(m.group(2)))
+            for m in re.finditer(r'<line x1="([0-9.]+)" y1="139.0" x2="([0-9.]+)" y2="139.0" class="dash" />', svg)
+        ]
+        centers = [(x1 + x2) / 2.0 for x1, x2 in dash_segments]
+        if len(centers) >= 2:
+            self.assertGreaterEqual(min(b - a for a, b in zip(centers, centers[1:])), 8.0)
+        self.assertTrue(dash_segments)
+        self.assertGreaterEqual(min(x2 - x1 for x1, x2 in dash_segments), 10.0)
+        if len(dash_segments) >= 2:
+            self.assertGreaterEqual(
+                min(next_x1 - prev_x2 for (_, prev_x2), (next_x1, _) in zip(dash_segments, dash_segments[1:])),
+                5.0,
+            )
+
+    def test_notehead_is_not_centered_into_extension_area(self):
+        svg = render_score_svg(parse_mustex_text("key: 1=F\n\n3--- |"))
+        note_match = re.search(r'<text x="([0-9.]+)" y="138.0" text-anchor="middle" dominant-baseline="middle" class="digit">3</text>', svg)
+        dash_xs = [
+            (float(match.group(1)) + float(match.group(2))) / 2.0
+            for match in re.finditer(r'<line x1="([0-9.]+)" y1="139.0" x2="([0-9.]+)" y2="139.0" class="dash" />', svg)
+        ]
+        self.assertIsNotNone(note_match)
+        self.assertGreater(len(dash_xs), 0)
+        self.assertLess(float(note_match.group(1)), dash_xs[0] - 8.0)
+
+    def test_wide_digits_keep_clear_gap_before_extension(self):
+        for digit in ("3", "6"):
+            svg = render_score_svg(parse_mustex_text(f"key: 1=F\n\n{digit}-- |"))
+            note_match = re.search(
+                rf'<text x="([0-9.]+)" y="138.0" text-anchor="middle" dominant-baseline="middle" class="digit">{digit}</text>',
+                svg,
+            )
+            dash_match = re.search(
+                r'<line x1="([0-9.]+)" y1="139.0" x2="([0-9.]+)" y2="139.0" class="dash" />',
+                svg,
+            )
+            self.assertIsNotNone(note_match)
+            self.assertIsNotNone(dash_match)
+            self.assertGreater(float(dash_match.group(1)) - float(note_match.group(1)), 16.0)
+
+    def test_mute_closing_paren_clears_extension_boxes(self):
+        svg = render_score_svg(parse_mustex_text("key: 1=F\n\n( 6-- ) |"))
+        dash_match = re.search(
+            r'<line x1="([0-9.]+)" y1="139.0" x2="([0-9.]+)" y2="139.0" class="dash" />',
+            svg,
+        )
+        paren_match = re.search(
+            r'<text x="([0-9.]+)" y="138.0" text-anchor="middle" dominant-baseline="middle" class="mark">\)</text>',
+            svg,
+        )
+        self.assertIsNotNone(dash_match)
+        self.assertIsNotNone(paren_match)
+        self.assertGreater(float(paren_match.group(1)) - float(dash_match.group(2)), 6.0)
+
+    def test_house_snaps_to_previous_barline(self):
+        svg = render_score_svg(parse_mustex_text("key: 1=F\n\n1 | [1 2 | 3 |]"))
+        barlines = [
+            float(match.group(1))
+            for match in re.finditer(r'<line x1="([0-9.]+)" y1="110.0" x2="\1" y2="180.0" class="thin" />', svg)
+        ]
+        house_line = re.search(
+            r'<line x1="([0-9.]+)" y1="102.0" x2="([0-9.]+)" y2="102.0" class="thin" />',
+            svg,
+        )
+        self.assertIsNotNone(house_line)
+        self.assertIn(float(house_line.group(1)), barlines)
+
+    def test_house_draws_closing_vertical(self):
+        svg = render_score_svg(parse_mustex_text("key: 1=F\n\n[1 2 | 3 |]"))
+        house_line = re.search(
+            r'<line x1="([0-9.]+)" y1="102.0" x2="([0-9.]+)" y2="102.0" class="thin" />',
+            svg,
+        )
+        closings = re.findall(
+            r'<line x1="([0-9.]+)" y1="102.0" x2="\1" y2="114.0" class="thin" />',
+            svg,
+        )
+        self.assertIsNotNone(house_line)
+        self.assertTrue(closings)
+        self.assertAlmostEqual(float(house_line.group(2)), float(closings[-1]), places=1)
+
+    def test_sparse_measure_uses_edges_better(self):
+        svg = render_score_svg(parse_mustex_text("key: 1=F\n\n1 2 3 |"))
+        xs = [
+            float(match.group(1))
+            for match in re.finditer(r'<text x="([0-9.]+)" y="138.0" text-anchor="middle" dominant-baseline="middle" class="digit">[123]</text>', svg)
+        ]
+        self.assertEqual(len(xs), 3)
+        self.assertLess(xs[0], 110.0)
+        self.assertGreater(xs[-1], 940.0)
 
 
     def test_parse_lyrics_inline(self):
