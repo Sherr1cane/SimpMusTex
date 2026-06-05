@@ -247,6 +247,28 @@ class TestMusTexParse(unittest.TestCase):
         with self.assertRaises(MusTexParseError):
             parse_mustex_text('key: 1=F\n\n"落" 1 2 |')
 
+    def test_parse_tie_span(self):
+        score = parse_mustex_text("key: 1=F\n\n<t 6 | 6 > |")
+        curves = score["sections"][0]["curves"]
+        self.assertEqual(len(curves), 1)
+        self.assertEqual(curves[0]["kind"], "tie")
+
+    def test_tie_span_cross_measure(self):
+        score = parse_mustex_text("key: 1=F\n\n<t 6--- | 6 > |")
+        curves = score["sections"][0]["curves"]
+        self.assertEqual(len(curves), 1)
+        self.assertEqual(curves[0]["kind"], "tie")
+
+    def test_tie_span_rejects_different_pitch(self):
+        with self.assertRaises(MusTexParseError):
+            parse_mustex_text("key: 1=F\n\n<t 6 | 5 > |")
+
+    def test_render_roundtrip_tie_span(self):
+        text = "key: 1=F\n\n<t 6 | 6 > |"
+        rendered = render_score_text(parse_mustex_text(text))
+        self.assertIn("<t 6", rendered)
+        self.assertIn(">", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

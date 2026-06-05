@@ -117,10 +117,10 @@ def render_score_text(score: dict[str, Any]) -> str:
                 elif kind == "tuplet":
                     prefix_tokens.extend(["<tuplet", marker["ratio"]])
                 elif kind == "tie":
-                    token = f"{token}~"
+                    prefix_tokens.append("<t")
             for marker in end_markers:
                 kind = marker["kind"]
-                if kind in {"slur", "phrase", "tuplet"}:
+                if kind in {"slur", "phrase", "tuplet", "tie"}:
                     suffix_tokens.append(">")
                 elif kind == "mute":
                     suffix_tokens.append(")")
@@ -246,7 +246,12 @@ def render_score_svg(score: dict[str, Any]) -> str:
             x += measure_width + measure_gap
 
     parts.extend(_render_curves_svg(curves, placements))
-    parts.extend(_render_groups_svg(groups, placements))
+    elements_by_id = {
+        elem["id"]: elem
+        for measure in measures
+        for elem in measure.get("elements", [])
+    }
+    parts.extend(_render_groups_svg(groups, placements, elements_by_id))
     parts.extend(_render_tuplets_svg(tuplets, placements))
     parts.extend(_render_houses_svg(houses, measures, measure_bounds))
 
@@ -416,12 +421,15 @@ def _parse_body(
         if token == "<p":
             span_stack.append({"kind": "phrase", "startId": None, "endId": None})
             i += 1; continue
+        if token == "<t":
+            span_stack.append({"kind": "tie", "startId": None, "endId": None})
+            i += 1; continue
         if token == "(":
             span_stack.append({"kind": "mute", "startId": None, "endId": None})
             i += 1; continue
         if token == ">":
-            if not span_stack or span_stack[-1]["kind"] not in {"slur", "phrase", "tuplet"}:
-                raise MusTexParseError("Encountered '>' without a matching '<s'.")
+            if not span_stack or span_stack[-1]["kind"] not in {"slur", "phrase", "tuplet", "tie"}:
+                raise MusTexParseError("Encountered '>' without a matching '<s', '<p', '<t', or '<tuplet'.")
             span_state = span_stack.pop()
             if not span_state["startId"] or not span_state["endId"]:
                 raise MusTexParseError(f"{span_state['kind']} span must contain at least one note.")
@@ -438,6 +446,17 @@ def _parse_body(
                     }
                 )
             else:
+                if span_state["kind"] == "tie":
+                    # Validate tie: start and end must be the same pitch
+                    end_elem = next((e for e in current_elements if e.get("id") == span_state["endId"]), None)
+                    if end_elem is None:
+                        # May have been flushed into a measure
+                        for m in measures:
+                            end_elem = next((e for e in m.get("elements", []) if e.get("id") == span_state["endId"]), None)
+                            if end_elem:
+                                break
+                    if end_elem:
+                        _validate_tie_pair(span_state["startId"], end_elem, measures, current_elements)
                 curves.append(
                     {
                         "id": f"curve_{span_state['kind']}_{len(curves) + 1:03d}",
@@ -1193,7 +1212,7 @@ def _render_curves_svg(curves: list[dict[str, Any]], placements: dict[str, dict[
     return parts
 
 
-def _render_groups_svg(groups: list[dict[str, Any]], placements: dict[str, dict[str, float | int]]) -> list[str]:
+def _render_groups_svg(groups: list[dict[str, Any]], placements: dict[str, dict[str, float | int]], elements_by_id: dict[str, dict[str, Any]] | None = None) -> list[str]:
     parts: list[str] = []
     for group in groups:
         if group.get("kind") != "mute":
@@ -1208,8 +1227,14 @@ def _render_groups_svg(groups: list[dict[str, Any]], placements: dict[str, dict[
             f'<text x="{float(start["center_x"]) - 14:.1f}" y="{start_baseline_y:.1f}" '
             f'text-anchor="middle" dominant-baseline="middle" class="mark">(</text>'
         )
+        # Offset ) to account for extensions (---) on the last element
+        end_x = float(end["center_x"]) + 14.0
+        if elements_by_id:
+            end_elem = elements_by_id.get(group.get("endId"), {})
+            ext_count = int(end_elem.get("duration", {}).get("extensions", 0))
+            end_x += ext_count * 28.0  # each extension slot ≈ cell_width
         parts.append(
-            f'<text x="{float(end["center_x"]) + 14:.1f}" y="{end_baseline_y:.1f}" '
+            f'<text x="{end_x:.1f}" y="{end_baseline_y:.1f}" '
             f'text-anchor="middle" dominant-baseline="middle" class="mark">)</text>'
         )
     return parts
