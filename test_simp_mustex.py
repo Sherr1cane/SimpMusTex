@@ -216,5 +216,37 @@ class TestMusTexParse(unittest.TestCase):
         self.assertIn('cy="137.0"', svg)
 
 
+    def test_parse_lyrics_inline(self):
+        score = parse_mustex_text('key: 1=F\n\n1"你" 2"好" 3 4"界" |')
+        elements = score["sections"][0]["measures"][0]["elements"]
+        self.assertEqual(elements[0]["lyrics"], "你")
+        self.assertEqual(elements[1]["lyrics"], "好")
+        self.assertNotIn("lyrics", elements[2])  # no lyrics on this note
+        self.assertEqual(elements[3]["lyrics"], "界")
+
+    def test_parse_lyrics_attached(self):
+        """Lyrics can be written directly attached: 1\"我\" or with space: 1 \"我\"."""
+        score = parse_mustex_text('key: 1=F\n\n1"我" |')
+        elements = score["sections"][0]["measures"][0]["elements"]
+        self.assertEqual(elements[0]["lyrics"], "我")
+
+    def test_render_roundtrip_lyrics(self):
+        text = 'key: 1=F\n\n1"春" 2"天" |'
+        rendered = render_score_text(parse_mustex_text(text))
+        self.assertIn('1"春"', rendered)
+        self.assertIn('2"天"', rendered)
+
+    def test_render_svg_lyrics(self):
+        score = parse_mustex_text('key: 1=F\n\n1"风" 2"花" |')
+        svg = render_score_svg(score)
+        self.assertIn('class="lyrics"', svg)
+        self.assertIn(">风<", svg)
+        self.assertIn(">花<", svg)
+
+    def test_lyrics_without_preceding_note_rejected(self):
+        with self.assertRaises(MusTexParseError):
+            parse_mustex_text('key: 1=F\n\n"落" 1 2 |')
+
+
 if __name__ == "__main__":
     unittest.main()

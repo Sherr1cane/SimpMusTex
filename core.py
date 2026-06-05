@@ -193,6 +193,7 @@ def render_score_svg(score: dict[str, Any]) -> str:
         ".mark { font: 18px 'Helvetica Neue', Arial, sans-serif; }",
         ".grace { font: 14px 'Helvetica Neue', Arial, sans-serif; }",
         ".dash { font: 16px 'Helvetica Neue', Arial, sans-serif; }",
+        ".lyrics { font: 16px 'Noto Serif CJK SC', 'Songti SC', serif; fill: #333; }",
         ".bar { stroke: #111; stroke-width: 2; }",
         ".thin { stroke: #111; stroke-width: 1.5; }",
         ".dot { fill: #111; }",
@@ -390,22 +391,34 @@ def _parse_body(
             pending_tie_start = None
         return element
 
-    for token in raw_tokens:
+    i = 0
+    while i < len(raw_tokens):
+        token = raw_tokens[i]
+
+        # Lyrics token: attach to the most recent element
+        if token.startswith('"') and token.endswith('"') and len(token) >= 2:
+            lyrics_text = token[1:-1]
+            if not current_elements:
+                raise MusTexParseError(f"Lyrics {token!r} has no preceding note to attach to.")
+            current_elements[-1]["lyrics"] = lyrics_text
+            i += 1
+            continue
+
         if token == "<tuplet":
             span_stack.append({"kind": "tuplet", "startId": None, "endId": None, "ratio": None})
-            continue
+            i += 1; continue
         if span_stack and span_stack[-1]["kind"] == "tuplet" and span_stack[-1]["ratio"] is None:
             span_stack[-1]["ratio"] = _parse_tuplet_ratio(token)
-            continue
+            i += 1; continue
         if token == "<s":
             span_stack.append({"kind": "slur", "startId": None, "endId": None})
-            continue
+            i += 1; continue
         if token == "<p":
             span_stack.append({"kind": "phrase", "startId": None, "endId": None})
-            continue
+            i += 1; continue
         if token == "(":
             span_stack.append({"kind": "mute", "startId": None, "endId": None})
-            continue
+            i += 1; continue
         if token == ">":
             if not span_stack or span_stack[-1]["kind"] not in {"slur", "phrase", "tuplet"}:
                 raise MusTexParseError("Encountered '>' without a matching '<s'.")
@@ -433,7 +446,7 @@ def _parse_body(
                         "endId": span_state["endId"],
                     }
                 )
-            continue
+            i += 1; continue
         if token == ")":
             if not span_stack or span_stack[-1]["kind"] != "mute":
                 raise MusTexParseError("Encountered ')' without a matching '('.")
@@ -448,7 +461,7 @@ def _parse_body(
                     "endId": span_state["endId"],
                 }
             )
-            continue
+            i += 1; continue
         if token.startswith("[") and token[1:].isdigit():
             if current_house is not None:
                 raise MusTexParseError("Nested house markers are not supported.")
@@ -457,14 +470,14 @@ def _parse_body(
                 "number": int(token[1:]),
                 "startMeasure": len(measures) + 1,
             }
-            continue
+            i += 1; continue
         if token == "]":
             if current_house is None:
                 raise MusTexParseError("Encountered ']' without a matching house start.")
             current_house["endMeasure"] = len(measures) if not current_elements else len(measures) + 1
             houses.append(current_house)
             current_house = None
-            continue
+            i += 1; continue
         if token in {"|", "||", "|:", ":|", ":|:"}:
             right_barline, next_left_barline = _handle_barline_token(
                 token,
@@ -482,7 +495,7 @@ def _parse_body(
                     )
                 )
                 current_elements = []
-            continue
+            i += 1; continue
 
         if "~" in token:
             left_token, right_token = token.split("~", 1)
@@ -495,13 +508,14 @@ def _parse_body(
                 right_element = append_element(right_token)
                 if right_element.get("type") != "note":
                     raise MusTexParseError("Tie end must be a note.")
-            continue
+            i += 1; continue
 
         element = append_element(token)
         if token.endswith("~"):
             if element.get("type") != "note":
                 raise MusTexParseError("Tie start must be a note.")
             pending_tie_start = element["id"]
+        i += 1
 
     if current_elements:
         measures.append(
@@ -530,8 +544,29 @@ def _parse_body(
 def _tokenize_body(body: str) -> list[str]:
     tokens: list[str] = []
     for raw_token in body.replace("\n", " ").split():
-        tokens.extend(_split_compound_token(raw_token))
+        # Split off quoted lyrics: 6"我" → 6, "我"
+        parts = _split_lyrics_from_token(raw_token)
+        for part in parts:
+            if part.startswith('"') and part.endswith('"') and len(part) >= 2:
+                tokens.append(part)
+            else:
+                tokens.extend(_split_compound_token(part))
     return [token for token in tokens if token]
+
+
+def _split_lyrics_from_token(raw_token: str) -> list[str]:
+    """Split quoted lyrics from a token: 6\"我\" → ['6', '\"我\"']."""
+    import re as _re
+    parts: list[str] = []
+    last = 0
+    for match in _re.finditer(r'"[^"]*"', raw_token):
+        if match.start() > last:
+            parts.append(raw_token[last:match.start()])
+        parts.append(match.group(0))
+        last = match.end()
+    if last < len(raw_token):
+        parts.append(raw_token[last:])
+    return parts
 
 
 def _split_compound_token(raw_token: str) -> list[str]:
@@ -807,7 +842,8 @@ def _render_element(element: dict[str, Any]) -> str:
     grace_before = "".join(_render_grace_token(grace) for grace in element.get("graceBefore", []))
     grace_after = "".join(_render_grace_token(grace) for grace in element.get("graceAfter", []))
     ornaments = "".join(_render_ornament_token(ornament) for ornament in element.get("ornaments", []))
-    return f"{grace_before}{base}{grace_after}{ornaments}"
+    lyrics = f'"{element["lyrics"]}"' if element.get("lyrics") else ""
+    return f"{grace_before}{base}{grace_after}{ornaments}{lyrics}"
 
 
 def _render_element_base(element: dict[str, Any]) -> str:
@@ -1012,6 +1048,13 @@ def _render_element_svg(element: dict[str, Any], center_x: float, baseline_y: fl
         cy = baseline_y
         parts.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="1.8" class="dot" />')
     parts.extend(_render_ornaments_svg(element.get("ornaments", []), center_x, baseline_y))
+
+    lyrics = element.get("lyrics")
+    if lyrics:
+        parts.append(
+            f'<text x="{center_x:.1f}" y="{baseline_y + 38:.1f}" text-anchor="middle" dominant-baseline="middle" class="lyrics">{escape(lyrics)}</text>'
+        )
+
     return parts
 
 
